@@ -348,7 +348,8 @@ def act(action, expected_guard):
         node = REG.get(int(action["node"]))
         if node is None:
             return {"error": "gone"}
-        if expected_guard is not None and guard(node) != expected_guard:
+        # No guard means the caller has nothing to check against: refuse rather than act blind.
+        if expected_guard is None or guard(node) != expected_guard:
             return {"error": "stale"}
     before = window_signature()
     if kind == "click":
@@ -368,7 +369,10 @@ def act(action, expected_guard):
         if not select_value(node, action.get("value", "")):
             return {"error": "option"}
     elif kind == "press":
-        xdo("key", "--clearmodifiers", KEYS.get(action.get("key"), "Return"))
+        key = KEYS.get(action.get("key"))
+        if key is None:
+            return {"error": "key"}
+        xdo("key", "--clearmodifiers", key)
     elif kind == "scroll":
         w, h = screen_size()
         xdo("mousemove", str(w // 2), str(h // 2), "click", "--repeat", "5", "5" if action.get("direction") == "down" else "4")

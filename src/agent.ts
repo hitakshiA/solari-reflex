@@ -16,7 +16,7 @@
 // run can be compared phase by phase (the shape jev-use reports).
 
 import type { Action, Surface } from "./surface.ts";
-import { ReflexError, StaleObservationError } from "./errors.ts";
+import { ModelError, ReflexError, StaleObservationError } from "./errors.ts";
 import type { Advisor, Planner, TextWriter } from "./models.ts";
 import type { Observation } from "./page/observer.ts";
 import type { Decision, HistoryEntry, Policy } from "./policy.ts";
@@ -61,7 +61,7 @@ export interface TaskReport {
   steps: StepRecord[];
   decisions: DecisionRecord[];
   /** The checklist from the planner, when one was used, and how far the task got through it. */
-  plan?: { steps: string[]; reached: number; ms: number };
+  plan?: { steps: string[]; finish?: string; reached: number; ms: number };
   /** Totals for the whole task, in ms. */
   timings: { totalMs: number; observeMs: number; decideMs: number; writeMs: number; actMs: number };
   usage: { jevCalls: number; jevInputTokens: number; advisorCalls: number; writerCalls: number; costUsd: number };
@@ -133,22 +133,26 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
 
   let [observation, observeMs] = await timed("observeMs", () => o.page.observe());
   let plan: string[] = [];
+  let finish: string | undefined;
   let stepIndex = 0;
   if (o.planner) {
     const t0 = performance.now();
     const p = await o.planner.plan(o.goal, observation);
     report.usage.costUsd += p.cost ?? 0;
     plan = p.steps;
-    report.plan = { steps: plan, reached: 0, ms: Math.round(performance.now() - t0) };
+    finish = p.finish;
+    report.plan = { steps: plan, ...(finish ? { finish } : {}), reached: 0, ms: Math.round(performance.now() - t0) };
   }
   const currentStep = () => plan[stepIndex];
   // A text value survives a stale retry only if the field it was written for is unchanged.
   let written: { key: string; text: string } | undefined;
+  // Toggles clicked on the last step are not offered for clicking again on the next.
+  let justToggled = new Set<number>();
 
   try {
     while (report.steps.length < maxSteps) {
       const [decision, decideMs] = await timed("decideMs", () =>
-        decide(o, observation, history, { actAt, doneAt, stepDoneAt, blockedAt }, report, currentStep()));
+        decide(o, observation, history, { actAt, doneAt, stepDoneAt, blockedAt }, report, currentStep(), finish, justToggled));
 
       // A finished plan step moves the checklist on without acting; the next step is decided fresh.
       if (currentStep() && (decision.stepDone ?? 0) >= stepDoneAt && stepIndex < plan.length - 1) {
@@ -188,11 +192,13 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
       const action = toAction(decision, text);
       try {
         const [outcome, actMs] = await timed("actMs", () => o.page.act(action, observation));
+        justToggled = action.kind === "click" && ["checkbox", "radio", "switch"].includes(action.element.role)
+          ? new Set([action.element.node]) : new Set();
         const before = observation;
         [observation, observeMs] = await timed("observeMs", () => o.page.observe());
         written = undefined;
         const pageChanged = outcome.navigated || observation.pageKey !== before.pageKey || observation.text !== before.text;
-        const label = describeAction(decision, text);
+        const label = describeAction(decision, text) + changeOf(action, observation);
         history.push({ action: label, pageChanged });
         const record: StepRecord = {
           step: report.steps.length + 1,
@@ -250,9 +256,10 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
 
 async function decide(
   o: RunOptions, observation: Observation, history: readonly HistoryEntry[],
-  gates: { actAt: number; doneAt: number; stepDoneAt: number; blockedAt: number }, report: TaskReport, step?: string,
+  gates: { actAt: number; doneAt: number; stepDoneAt: number; blockedAt: number }, report: TaskReport, step?: string, finish?: string,
+  justToggled?: ReadonlySet<number>,
 ): Promise<Decision> {
-  const decision = await o.policy.decide(o.goal, observation, history, step);
+  const decision = await o.policy.decide(o.goal, observation, history, step, finish, justToggled);
   report.decisions.push(record(decision));
   report.usage.jevCalls++;
   report.usage.jevInputTokens += decision.inputTokens;
@@ -260,7 +267,11 @@ async function decide(
   // A finished page, step or blocked page is acted on whatever the next pick would have been.
   if (decision.done >= gates.doneAt || decision.blocked >= gates.blockedAt || (decision.stepDone ?? 0) >= gates.stepDoneAt) return decision;
   if (decision.confidence >= gates.actAt || !o.advisor) return decision;
-  const advised = await o.advisor.decide(step ? `${step} (one step of: ${o.goal})` : o.goal, observation, history, o.policy.offer(observation));
+  const advised = await o.advisor
+    .decide(step ? `${step} (one step of: ${o.goal})` : o.goal, observation, history, o.policy.offer(observation, justToggled))
+    // An Advisor answer that names nothing on offer is discarded; Jev's pick stands.
+    .catch((e: unknown) => { if (e instanceof ModelError) return undefined; throw e; });
+  if (!advised) return { ...decision, confidence: Math.max(decision.confidence, gates.actAt) };
   report.decisions.push(record(advised));
   report.usage.advisorCalls++;
   report.usage.costUsd += advised.cost ?? 0;
@@ -291,6 +302,19 @@ function toAction(d: Decision, text: string | undefined): Action {
     case "SCROLL_UP": return { kind: "scroll", direction: "up" };
     case "WAIT": return { kind: "wait" };
   }
+}
+
+/** What the action visibly changed on its own target, e.g. ` → checked true→false`. */
+function changeOf(action: Action, after: Observation): string {
+  if (!("element" in action)) return "";
+  const before = action.element;
+  const now = after.elements.find((e) => e.node === before.node);
+  if (!now) return " → the control is gone";
+  const parts: string[] = [];
+  for (const k of ["checked", "selected", "expanded", "value"] as const) {
+    if (before[k] !== now[k]) parts.push(`${k} ${before[k] ?? "∅"}→${now[k] ?? "∅"}`);
+  }
+  return parts.length ? ` → ${parts.join(", ")}` : "";
 }
 
 function describeAction(d: Decision, text: string | undefined): string {

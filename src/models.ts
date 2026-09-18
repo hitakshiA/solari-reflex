@@ -118,7 +118,7 @@ const ADVISE = [
   'Reply with a JSON object: {"operation": one of the offered operations, "target": the offered target key for',
   'that operation or null, "done": true only if the page already shows every requirement met,',
   '"blocked": true only if no offered operation can make progress}.',
-  "Choose only from what is offered.",
+  "Choose only from what is offered. If a dialog or popup is open, finish it (Update, Apply, Done) or close it first.",
 ].join(" ");
 
 export class Advisor extends ChatModel {
@@ -162,14 +162,16 @@ export class Advisor extends ChatModel {
 // --------------------------------------------------------------- planning ----
 
 const PLAN = [
-  'Break the user\'s goal into the short, ordered steps a person would take on screen. Reply with {"steps": [..]}.',
-  "Each step is one visible outcome in plain words (\"Set quantity to 2\", \"Enter the email ada@example.com\"), and",
-  "carries every value it needs from the goal. Keep the goal's order; 2 to 12 steps; no step about stopping.",
+  'Break the user\'s goal into the short, ordered steps a person would take on screen. Reply with',
+  '{"steps": [..], "finish": ".."}. Each step is one visible outcome in plain words ("Set quantity to 2",',
+  '"Enter the email ada@example.com") and carries every value it needs from the goal. Keep the goal\'s order;',
+  "2 to 12 steps; no step about stopping. \"finish\" is what the screen shows once the whole task is complete",
+  '(for example "the page says the payment succeeded, or that the card was declined").',
 ].join(" ");
 
 export class Planner extends ChatModel {
   /** One call per task: the goal as an ordered checklist the decision loop walks through. */
-  async plan(goal: string, observation?: Observation): Promise<{ steps: string[]; latencyMs: number; cost?: number }> {
+  async plan(goal: string, observation?: Observation): Promise<{ steps: string[]; finish?: string; latencyMs: number; cost?: number }> {
     const r = await this.complete(PLAN, { goal, ...(observation ? { page: { title: observation.title, url: observation.url } } : {}) }, 1200);
     // Models vary the key and sometimes return objects; accept the common shapes.
     const list = [r.json.steps, r.json.plan, r.json.checklist].find(Array.isArray) as unknown[] | undefined;
@@ -177,6 +179,7 @@ export class Planner extends ChatModel {
       .map((s) => typeof s === "string" ? s : (s && typeof s === "object" ? Object.values(s as Record<string, unknown>).find((v) => typeof v === "string") : undefined))
       .filter((s): s is string => typeof s === "string" && s.trim().length > 0);
     if (steps.length === 0) throw new ModelError(this.model, `returned no steps: ${JSON.stringify(r.json).slice(0, 200)}`);
-    return { steps: steps.slice(0, 20), latencyMs: r.latencyMs, ...(r.cost !== undefined ? { cost: r.cost } : {}) };
+    const finish = typeof r.json.finish === "string" && r.json.finish.trim() ? r.json.finish.trim() : undefined;
+    return { steps: steps.slice(0, 20), ...(finish ? { finish } : {}), latencyMs: r.latencyMs, ...(r.cost !== undefined ? { cost: r.cost } : {}) };
   }
 }

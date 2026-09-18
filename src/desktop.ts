@@ -63,8 +63,8 @@ export class DesktopSurface implements Surface {
       throw new BrowserConnectionError(`reflexd did not start: ${(r.stderr || r.stdout).slice(-300)}`);
     }
     if ((o.transport ?? "preview") === "preview") {
-      surface.baseUrl = (await o.solari.previewUrl(o.sandboxId, PORT)).replace(/\/$/, "");
-      const health = await fetch(`${surface.baseUrl}/health`).then((x) => x.json()).catch(() => null) as { ok?: boolean } | null;
+      surface.baseUrl = await o.solari.previewUrl(o.sandboxId, PORT);
+      const health = await fetch(surface.endpoint("/health")).then((x) => x.json()).catch(() => null) as { ok?: boolean } | null;
       if (!health?.ok) surface.baseUrl = undefined;
     }
     return surface;
@@ -133,8 +133,19 @@ export class DesktopSurface implements Surface {
     return reply.result as T;
   }
 
+  /**
+   * Preview URLs carry their access token in the query string
+   * (`https://<id>-7788.preview.getsolari.com?pt_token=…`), so the path is set on
+   * the parsed URL rather than appended to the string.
+   */
+  private endpoint(path: string): string {
+    const u = new URL(this.baseUrl!);
+    u.pathname = path;
+    return u.toString();
+  }
+
   private async viaPreview<T>(path: string, body: unknown): Promise<Reply<T>> {
-    const r = await fetch(`${this.baseUrl}${path}`, {
+    const r = await fetch(this.endpoint(path), {
       method: "POST",
       headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),

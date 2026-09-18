@@ -76,6 +76,7 @@ const NEXT_ACTION = [
   "Do not toggle a checkbox, switch or radio that is already in the requested state.",
   "If a submit or search control is visible and the fields are ready, use it now.",
   "WAIT only when the needed control is missing or results are still loading; prefer a useful visible control.",
+  "If a dialog or popup is open, finish it first (Update, Apply, Done, Save) or close it; a value set inside a dialog is not applied until it is confirmed.",
 ].join(" ");
 
 const TARGET = [
@@ -85,7 +86,7 @@ const TARGET = [
 ].join(" ");
 
 const DONE = "Does the CURRENT page visibly show that every requirement of the goal is satisfied? A matching link or result that has not been opened is not enough.";
-const STEP_DONE = "Does the CURRENT page visibly show that this step is already complete (the value is set, the option applied, the field filled)?";
+const STEP_DONE = "Is this step already complete, judging by the CURRENT page and the last action and what it changed (a value now set, a box now unticked, a code now applied)?";
 const BLOCKED = "Is progress impossible from this page with the offered operations (for example a login wall, a captcha, or an error page)?";
 
 export class Policy {
@@ -107,10 +108,14 @@ export class Policy {
 
   /**
    * Decide the next step. With `step`, Jev works on that one item of a plan (the
-   * overall goal stays in view) and also reads whether it is already done.
+   * overall goal stays in view) and also reads whether it is already done. With
+   * `finish`, the done reading asks about what the end screen shows.
    */
-  async decide(goal: string, observation: Observation, history: readonly HistoryEntry[], step?: string): Promise<Decision> {
-    const offer = this.offer(observation);
+  async decide(
+    goal: string, observation: Observation, history: readonly HistoryEntry[], step?: string, finish?: string,
+    justToggled?: ReadonlySet<number>,
+  ): Promise<Decision> {
+    const offer = this.offer(observation, justToggled);
     const aim = step ? `${step} (this is one step of the overall goal: ${goal})` : goal;
     const operations = Object.keys(offer.operations) as Operation[];
     const questions: Record<string, ChoiceQuestion | NoulQuestion> = {
@@ -119,9 +124,18 @@ export class Policy {
         instructions: { goal: aim, rules: NEXT_ACTION },
         criteria: Object.fromEntries(operations.map((op) => [op, DESCRIPTIONS[op]])),
       },
-      done: { type: "noul", instructions: { goal, question: DONE } },
+      // With a finish condition, "done" asks about what the end screen shows, not about every
+      // requirement of the goal: a receipt page no longer shows the quantity or the promo code.
+      done: finish
+        ? { type: "noul", instructions: { question: `Does the CURRENT page visibly show this: ${finish}?` } }
+        : { type: "noul", instructions: { goal, question: DONE } },
       blocked: { type: "noul", instructions: { goal, question: BLOCKED } },
-      ...(step ? { step_done: { type: "noul" as const, instructions: { step, question: STEP_DONE } } } : {}),
+      ...(step ? {
+        step_done: {
+          type: "noul" as const,
+          instructions: { step, last_action: history.at(-1)?.action ?? "none yet", question: STEP_DONE },
+        },
+      } : {}),
     };
     for (const [head, targets] of Object.entries(offer.heads)) {
       questions[head] = {
@@ -170,8 +184,13 @@ export class Policy {
     return decision;
   }
 
-  /** Which operations and targets this observation supports, after deny filtering. */
-  offer(observation: Observation): Offer {
+  /**
+   * Which operations and targets this observation supports, after deny filtering.
+   * `justToggled` holds checkboxes, radios and switches clicked on the previous step: they
+   * are not offered for clicking again straight away, which stops a toggle being flipped
+   * on and off (enforced here, like the deny list, rather than asked of the model).
+   */
+  offer(observation: Observation, justToggled?: ReadonlySet<number>): Offer {
     const elements = observation.elements.filter((e) => this.allowed(e));
     const heads: Offer["heads"] = {};
     const add = (head: Head, key: string, target: Target) => { (heads[head] ??= {})[key] = target; };
@@ -184,7 +203,7 @@ export class Policy {
         continue;
       }
       if (e.editable) add("type_target", e.id, { element: e, criterion: describe(e) });
-      add("click_target", e.id, { element: e, criterion: describe(e) });
+      if (!justToggled?.has(e.node)) add("click_target", e.id, { element: e, criterion: describe(e) });
     }
 
     const operations: Partial<Record<Operation, true>> = {};
