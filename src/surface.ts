@@ -9,7 +9,8 @@ export type Key = "Enter" | "Escape" | "Tab";
 
 export type Action =
   | { kind: "click"; element: ObservedElement }
-  | { kind: "type"; element: ObservedElement; text: string }
+  /** Replace the control's text; `submit` presses Enter afterwards, with real key input. */
+  | { kind: "type"; element: ObservedElement; text: string; submit?: boolean }
   | { kind: "select"; element: ObservedElement; value: string }
   | { kind: "press"; key: Key }
   | { kind: "scroll"; direction: "up" | "down" }

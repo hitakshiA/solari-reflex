@@ -109,7 +109,7 @@ export class DesktopSurface implements Surface {
       action: {
         kind: action.kind,
         ...(element ? { node: element.node } : {}),
-        ...(action.kind === "type" ? { text: action.text } : {}),
+        ...(action.kind === "type" ? { text: action.text, ...(action.submit ? { submit: true } : {}) } : {}),
         ...(action.kind === "select" ? { value: action.value } : {}),
         ...(action.kind === "press" ? { key: action.key } : {}),
         ...(action.kind === "scroll" ? { direction: action.direction } : {}),
@@ -187,7 +187,9 @@ if ! python3 -c 'import gi; gi.require_version("Atspi","2.0")' 2>/dev/null; then
 fi
 mkdir -p /opt/reflex
 echo '${REFLEXD_GZ}' | base64 -d | gunzip > /opt/reflex/reflexd.py
-P=$(pgrep -x xfce4-session | head -1)
+# A fresh desktop may still be starting its session; wait for it rather than fail silently.
+for i in $(seq 1 60); do P=$(pgrep -x xfce4-session | head -1 || true); [ -n "$P" ] && break; sleep 0.5; done
+[ -n "$P" ] || { echo "no desktop session (xfce4-session) is running"; exit 1; }
 ps -o user= -p "$P" | tr -d ' ' > /opt/reflex/user
 tr '\\0' '\\n' < /proc/$P/environ | grep -E '^(DBUS_SESSION_BUS_ADDRESS|DISPLAY|XDG_RUNTIME_DIR|HOME|XAUTHORITY)=' > /opt/reflex/session.env
 cat > /opt/reflex/start.sh <<'SH'

@@ -171,6 +171,7 @@ export class BrowserPage implements Surface {
           ...clickAt(await this.locate(action.element, observation)),
           ...SELECT_ALL,
           ["Input.insertText", { text: action.text }],
+          ...(action.submit ? keyPress("Enter") : []),
         ]);
         break;
       case "select": {

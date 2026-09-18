@@ -35,7 +35,7 @@ import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi  # noqa: E402
 
-VERSION = 1
+VERSION = 2
 TOKEN = os.environ.get("REFLEXD_TOKEN", "")
 S = Atspi.StateType
 
@@ -225,6 +225,12 @@ def consider(node, st, out, text, limits):
         return
     if not name and mapped in ("row", "option", "gridcell"):
         name = text_of(node, 80)
+    if not name and editable:
+        # LibreOffice's Name Box is an unnamed entry inside a combo box called "Name Box".
+        try:
+            name = name_of(node.get_parent())
+        except Exception:
+            name = ""
     if not name and not editable:
         return
     el = {"node": REG.id_of(node), "role": mapped, "name": name or mapped, "editable": bool(editable)}
@@ -243,29 +249,77 @@ def consider(node, st, out, text, limits):
     out.append(el)
 
 
+def col_name(c):
+    s = ""
+    c += 1
+    while c:
+        c, r = divmod(c - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 def cell_neighbourhood(table, out, text, limits):
-    """For spreadsheet-sized tables: the focused cell, its row and the header row."""
+    """Spreadsheet-sized tables (Calc reports 2^31 cells): read the used, visible area as text
+    rows, and offer the active cell as an editable control named by its address ("E2")."""
     try:
         t = table.get_table_iface()
-        sel = table.get_selection_iface()
-        focused = None
-        if sel and sel.get_n_selected_children() > 0:
-            focused = sel.get_selected_child(0)
-        if not t or focused is None:
+        ext = extents(table)
+        if not t or not ext:
             return
-        idx = focused.get_index_in_parent()
-        row, col = t.get_row_at_index(idx), t.get_column_at_index(idx)
-        cells = [(0, c) for c in range(max(0, col - 4), col + 5)] + [(row, c) for c in range(max(0, col - 4), col + 5)]
-        for r, c in cells:
-            cell = t.get_accessible_at(r, c)
-            if cell is None:
+        # Width of the used area: header row until two empty cells in a row.
+        ncols, empty = 0, 0
+        for c in range(26):
+            if text_of(t.get_accessible_at(0, c), 80):
+                ncols, empty = c + 1, 0
+            else:
+                empty += 1
+                if empty >= 2:
+                    break
+        ncols = max(ncols, 1)
+        blank_rows = 0
+        fillable = 0
+        for r in range(0, 500):
+            first = t.get_accessible_at(r, 0)
+            box = extents(first) if first else None
+            if not box or box["y"] > ext["y"] + ext["h"]:
+                break
+            if box["y"] + box["h"] < ext["y"]:
                 continue
-            v = text_of(cell, 80)
-            el = {"node": REG.id_of(cell), "role": "gridcell", "name": name_of(cell) or f"R{r + 1}C{c + 1}",
-                  "editable": True}
-            if v:
-                el["value"] = v
-            out.append(el)
+            values = []
+            for c in range(ncols + 1):
+                cell = t.get_accessible_at(r, c)
+                if cell is None:
+                    continue
+                v = text_of(cell, 80)
+                values.append(v)
+                st = states_of(cell)
+                # An empty cell under a header is a place data goes: offer it by its address.
+                if not v and r > 0 and c < ncols and fillable < 60 and text_of(t.get_accessible_at(0, c), 80):
+                    fillable += 1
+                    el = {"node": REG.id_of(cell), "role": "gridcell", "name": f"{col_name(c)}{r + 1}", "editable": True}
+                    cb = extents(cell)
+                    if cb:
+                        el["rect"] = cb
+                    out.append(el)
+                    continue
+                if st and st.contains(S.FOCUSED):
+                    el = {"node": REG.id_of(cell), "role": "gridcell", "name": f"{col_name(c)}{r + 1}", "editable": True}
+                    if v:
+                        el["value"] = v
+                    cb = extents(cell)
+                    if cb:
+                        el["rect"] = cb
+                    out.append(el)
+            if any(values):
+                blank_rows = 0
+                row = " | ".join(f"{col_name(c)}={v}" for c, v in enumerate(values) if v)
+                if limits["text"] > 0:
+                    text.append(f"Row {r + 1}: {row}")
+                    limits["text"] -= len(row) + 10
+            else:
+                blank_rows += 1
+                if blank_rows >= 3:
+                    break
     except Exception:
         pass
 
@@ -360,7 +414,22 @@ def act(action, expected_guard):
             xdo("mousemove", str(box["x"] + box["w"] // 2), str(box["y"] + box["h"] // 2), "click", "1")
     elif kind == "type":
         text = action.get("text", "")
-        if not set_text(node, text):
+        if role_of(node) == "table cell":
+            # Select-all would select the whole sheet: move the cursor to the cell, type, commit
+            # with Enter. Focus through the accessibility API, not a click: Calc reports cell
+            # extents offset from where the grid is drawn.
+            focus(node)
+            time.sleep(0.05)
+            xdo("type", "--delay", "4", "--", text)
+            xdo("key", "--clearmodifiers", "Return")
+        elif action.get("submit"):
+            # Submitting needs keyboard focus in the field (a Name Box jump, a search box), so
+            # use real key input rather than setting the text through the accessibility API.
+            focus(node)
+            xdo("key", "--clearmodifiers", "ctrl+a")
+            xdo("type", "--delay", "4", "--", text)
+            xdo("key", "--clearmodifiers", "Return")
+        elif not set_text(node, text):
             focus(node)
             xdo("key", "--clearmodifiers", "ctrl+a")
             xdo("type", "--delay", "4", "--", text)
