@@ -13,7 +13,7 @@ export {
 export { Advisor, OPENROUTER_CHAT_URL, Planner, TextWriter, type ChatModelOptions, type WrittenText } from "./models.ts";
 export type { Observation, ObservedElement, Role } from "./page/observer.ts";
 export { overlayFor, type OverlayBox, type OverlayState } from "./page/overlay.ts";
-export { BrowserRecorder, type RecorderOptions } from "./recorder.ts";
+export { BrowserRecorder, DesktopRecorder, overlaySvg, type RecorderOptions } from "./recorder.ts";
 export { Policy, type Decision, type HistoryEntry, type Offer, type Operation, type PolicyOptions } from "./policy.ts";
 export {
   Solari, SOLARI_BASE_URL,

@@ -127,6 +127,34 @@ export class DesktopSurface implements Surface {
     return Buffer.from(r.jpeg, "base64");
   }
 
+  /**
+   * Start recording the whole screen with ffmpeg inside the desktop (installed on first
+   * use). Resolves once frames are being written. `startedAt` is on this machine's
+   * `performance.now()` clock, taken at the middle of the round trip.
+   */
+  async startRecording(o: { fps?: number } = {}): Promise<{ width: number; height: number; startedAt: number }> {
+    const r = await this.solari.exec(this.sandboxId, "bash", ["-c",
+      "command -v ffmpeg >/dev/null || { apt-get update -qq >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null 2>&1; }; command -v ffmpeg"], 300_000);
+    if (!r.stdout.trim()) throw new BrowserConnectionError("ffmpeg could not be installed on the desktop");
+    const sent = performance.now();
+    const size = await this.call<{ width: number; height: number; error?: string }>("/record/start", { fps: o.fps ?? 15 });
+    if (size.error) throw new BrowserConnectionError(`recording did not start: ${size.error}`);
+    return { width: size.width, height: size.height, startedAt: (sent + performance.now()) / 2 };
+  }
+
+  /** Stop the recording and download it as an MP4. */
+  async stopRecording(): Promise<Uint8Array> {
+    const r = await this.call<{ bytes?: number; error?: string }>("/record/stop", {});
+    if (r.error || !r.bytes) throw new BrowserConnectionError(`recording failed: ${r.error ?? "empty file"}`);
+    if (this.baseUrl) {
+      const file = await fetch(this.endpoint("/record/file"), { headers: { Authorization: `Bearer ${this.token}` }, signal: AbortSignal.timeout(300_000) });
+      if (!file.ok) throw new BrowserConnectionError(`recording download returned ${file.status}`);
+      return new Uint8Array(await file.arrayBuffer());
+    }
+    const b64 = await this.solari.exec(this.sandboxId, "base64", ["-w0", "/tmp/reflexd-recording.mp4"], 300_000);
+    return Buffer.from(b64.stdout, "base64");
+  }
+
   private async call<T>(path: string, body: unknown): Promise<T> {
     const reply = this.baseUrl ? await this.viaPreview<T>(path, body) : await this.viaExec<T>(path, body);
     if (reply.error) throw new BrowserConnectionError(`reflexd ${path}: ${reply.error}`);

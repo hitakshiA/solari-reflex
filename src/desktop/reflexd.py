@@ -7,6 +7,9 @@ Runs inside a Solari desktop, as the desktop user, and serves a tiny JSON-over-H
     POST /observe {max_elements, max_text_chars}  -> Observation (same shape as the browser observer)
     POST /act     {action, guard}     -> {"navigated": false} or {"error": "stale" | ...}
     POST /screenshot {quality}        -> {"jpeg": base64}
+    POST /record/start {fps}          -> {"width": W, "height": H}   (ffmpeg x11grab, H.264)
+    POST /record/stop                 -> {"bytes": N}
+    GET  /record/file                 -> the MP4 of the last recording
 
 One process holds the AT-SPI connection and a node registry, so every call is a single
 request with no interpreter start-up and no tree re-discovery. Requests are served one at a
@@ -17,7 +20,8 @@ Observation rules, adapted from the browser observer and Cua's cua-driver (MIT):
   - a node is offered when it is showing, enabled, has an action or is editable, and has a
     name (an unnamed list or table row borrows its own text, capped);
   - tables that claim huge child counts (LibreOffice Calc reports 2^31 cells) are never
-    enumerated; the focused cell and its neighbours are read instead;
+    enumerated; the used area is read as text instead, and its empty cells under a header
+    are offered by address;
   - every node gets a stable integer id for this process and a guard (role, name, value,
     state) that act() re-checks before any input is sent.
 """
@@ -35,7 +39,7 @@ import gi
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi  # noqa: E402
 
-VERSION = 2
+VERSION = 3
 TOKEN = os.environ.get("REFLEXD_TOKEN", "")
 S = Atspi.StateType
 
@@ -547,6 +551,55 @@ def screenshot(quality=70):
         return None
 
 
+RECORDING = "/tmp/reflexd-recording.mp4"
+RECORDER = None
+
+
+def record_start(fps=15):
+    """Record the whole screen with ffmpeg until record_stop. Returns once frames are being written."""
+    global RECORDER
+    if RECORDER and RECORDER.poll() is None:
+        return {"error": "already recording"}
+    geometry = subprocess.run(["xdotool", "getdisplaygeometry"], capture_output=True, text=True, timeout=5).stdout.split()
+    if len(geometry) != 2:
+        return {"error": "could not read the screen size"}
+    width, height = (int(v) // 2 * 2 for v in geometry)
+    try:
+        os.remove(RECORDING)
+    except OSError:
+        pass
+    try:
+        RECORDER = subprocess.Popen(
+            ["ffmpeg", "-loglevel", "error", "-f", "x11grab", "-draw_mouse", "1", "-framerate", str(int(fps)),
+             "-video_size", f"{width}x{height}", "-i", os.environ.get("DISPLAY", ":0"),
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-pix_fmt", "yuv420p", RECORDING],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return {"error": "ffmpeg is not installed"}
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if RECORDER.poll() is not None:
+            return {"error": f"ffmpeg exited: {RECORDER.stderr.read().decode(errors='replace')[-300:]}"}
+        if os.path.exists(RECORDING) and os.path.getsize(RECORDING) > 0:
+            return {"width": width, "height": height}
+        time.sleep(0.02)
+    return {"error": "ffmpeg wrote nothing within 5 s"}
+
+
+def record_stop():
+    global RECORDER
+    if not RECORDER:
+        return {"error": "not recording"}
+    try:
+        RECORDER.communicate(b"q", timeout=20)  # "q" lets ffmpeg finish the file cleanly
+    except subprocess.TimeoutExpired:
+        RECORDER.kill()
+        RECORDER.wait()
+    RECORDER = None
+    return {"bytes": os.path.getsize(RECORDING) if os.path.exists(RECORDING) else 0}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -567,6 +620,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             return self.reply(200, {"ok": True, "version": VERSION})
+        if self.path == "/record/file":
+            if not self.authorised():
+                return self.reply(401, {"error": "unauthorised"})
+            if RECORDER or not os.path.exists(RECORDING):
+                return self.reply(409, {"error": "no finished recording"})
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(os.path.getsize(RECORDING)))
+            self.end_headers()
+            with open(RECORDING, "rb") as f:
+                while chunk := f.read(1 << 16):
+                    self.wfile.write(chunk)
+            return None
         self.reply(404, {"error": "not found"})
 
     def do_POST(self):
@@ -585,6 +651,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = act(body.get("action", {}), body.get("guard"))
             elif self.path == "/screenshot":
                 result = {"jpeg": screenshot(body.get("quality", 70))}
+            elif self.path == "/record/start":
+                result = record_start(body.get("fps", 15))
+            elif self.path == "/record/stop":
+                result = record_stop()
             else:
                 return self.reply(404, {"error": "not found"})
         except Exception as e:  # never let one bad request kill the daemon
