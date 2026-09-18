@@ -17,5 +17,5 @@ export { BrowserRecorder, DesktopRecorder, overlaySvg, type RecorderOptions } fr
 export { Policy, type Decision, type HistoryEntry, type Offer, type Operation, type PolicyOptions } from "./policy.ts";
 export {
   Solari, SOLARI_BASE_URL,
-  type BrowserSession, type CreateBrowserOptions, type CreateDesktopOptions, type DesktopSession, type ExecResult, type SolariOptions,
+  type BrowserProfile, type BrowserSession, type CreateBrowserOptions, type CreateDesktopOptions, type DesktopSession, type ExecResult, type ProfileLogin, type SolariOptions,
 } from "./solari.ts";

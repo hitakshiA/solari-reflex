@@ -45,6 +45,22 @@ export interface BrowserSession {
   createMs: number;
 }
 
+export interface BrowserProfile {
+  id: string;
+  name?: string;
+  /** Bumped every time the profile's signed-in state is saved. */
+  version?: number;
+}
+
+export interface ProfileLogin {
+  handoffId: string;
+  /** Where the person signs in. */
+  url: string;
+  expiresAt: string;
+  /** The profile's version when the login was requested; a higher one means it was saved. */
+  version: number;
+}
+
 export interface CreateDesktopOptions {
   /** Image to boot. Default "default" (Ubuntu 22.04, XFCE, LibreOffice, Chrome). */
   template?: string;
@@ -128,6 +144,44 @@ export class Solari {
   async previewUrl(sandboxId: string, port: number): Promise<string> {
     const r = await this.request<{ url: string }>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/ports/${port}`);
     return r.url;
+  }
+
+  /** Saved browser profiles: stored signed-in state (cookies and localStorage) that new browsers can start from. */
+  async profiles(): Promise<BrowserProfile[]> {
+    const rows = await this.request<BrowserProfile[] | { profiles?: BrowserProfile[] }>("GET", "/profiles");
+    return Array.isArray(rows) ? rows : rows.profiles ?? [];
+  }
+
+  /** The profile with this name, created if there is none. */
+  async ensureProfile(name: string): Promise<BrowserProfile> {
+    const found = (await this.profiles()).find((p) => (p.name ?? "").toLowerCase() === name.toLowerCase());
+    if (found) return found;
+    return this.request<BrowserProfile>("POST", "/profiles", { name });
+  }
+
+  /**
+   * Ask a person to sign in to a profile. Returns a link to a Solari-hosted browser where they
+   * sign in themselves; the credentials and cookies never pass through this process or any
+   * model. Wait for it with {@link waitForProfileLogin}, then start browsers with
+   * `createBrowser({ profileId })`.
+   */
+  requestProfileLogin(profileId: string, reason: string): Promise<ProfileLogin> {
+    return this.request<ProfileLogin>("POST", `/profiles/${encodeURIComponent(profileId)}/login-handoff`, { reason });
+  }
+
+  /**
+   * Resolves true once the profile has been saved since `sinceVersion` (the person finished
+   * signing in), false at the timeout. Polls the profile list; nothing sensitive is returned.
+   */
+  async waitForProfileLogin(profileId: string, sinceVersion: number, o: { timeoutMs?: number; pollMs?: number } = {}): Promise<boolean> {
+    const deadline = performance.now() + (o.timeoutMs ?? 300_000);
+    while (performance.now() < deadline) {
+      const profile = (await this.profiles()).find((p) => p.id === profileId);
+      if (!profile) throw new SolariApiError(404, `profile ${profileId} no longer exists`);
+      if ((profile.version ?? 0) > sinceVersion) return true;
+      await new Promise((r) => setTimeout(r, o.pollMs ?? 2000));
+    }
+    return false;
   }
 
   /** Delete a sandbox or desktop. */
