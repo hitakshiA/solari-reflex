@@ -19,7 +19,7 @@
 //   - one entry per control; TYPE and SELECT are operations on it, not
 //     separate entries.
 
-export const OBSERVER_VERSION = 6;
+export const OBSERVER_VERSION = 7;
 
 export type Role =
   | "button" | "link" | "checkbox" | "radio" | "switch" | "tab" | "menuitem" | "option"
@@ -109,6 +109,35 @@ export function installObserver(version: number): PageObserver {
   const SECRET_TYPES = new Set(["password", "hidden", "file"]);
   const OWNING_ROLES = new Set<Role>(["link", "button", "option", "menuitem", "tab"]);
 
+  // Open shadow roots are part of the page a person sees (Salesforce Lightning, most design
+  // systems built on web components), so they are walked as if they were light DOM. Closed
+  // roots, such as the reflex overlay, stay closed.
+  /** Elements matching `selector` in document order, descending into each open shadow root where its host is. */
+  const queryAll = (selector: string, root: Node = document): Element[] => {
+    const out: Element[] = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    for (let n = walker.nextNode() as Element | null; n; n = walker.nextNode() as Element | null) {
+      if (n.matches(selector)) out.push(n);
+      if (n.shadowRoot) out.push(...queryAll(selector, n.shadowRoot));
+    }
+    return out;
+  };
+  /** The topmost element at a point, looking inside shadow hosts. */
+  const pointAt = (x: number, y: number): Element | null => {
+    let top = document.elementFromPoint(x, y);
+    while (top?.shadowRoot) {
+      const inner = top.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === top) break;
+      top = inner;
+    }
+    return top;
+  };
+  /** `outer.contains(inner)`, across shadow boundaries. */
+  const holds = (outer: Element, inner: Element): boolean => {
+    for (let n: Node | null = inner; n; n = n.parentNode ?? (n as ShadowRoot).host ?? null) if (n === outer) return true;
+    return false;
+  };
+
   const visible = (e: Element): boolean =>
     !e.closest("[aria-hidden=\"true\"],[inert]") && e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
   const disabled = (e: Element): boolean =>
@@ -118,7 +147,8 @@ export function installObserver(version: number): PageObserver {
     if (!e || seen.has(e)) return "";
     seen.add(e);
     const labelledBy = (e.getAttribute("aria-labelledby") ?? "").split(/\s+/).filter(Boolean)
-      .map((id) => accessibleName(document.getElementById(id), seen)).filter(Boolean).join(" ");
+      .map((id) => accessibleName((e.getRootNode() as Document | ShadowRoot).getElementById?.(id) ?? document.getElementById(id), seen))
+      .filter(Boolean).join(" ");
     const input = e as HTMLInputElement;
     const fromLabels = [...(input.labels ?? [])].map((l) => accessibleName(l, seen)).filter(Boolean).join(" ");
     const buttonValue = ["button", "submit", "reset"].includes(input.type) ? input.value : "";
@@ -188,11 +218,11 @@ export function installObserver(version: number): PageObserver {
     const r = e.getBoundingClientRect();
     const x = Math.min(Math.max(r.left + r.width / 2, 0), innerWidth - 1);
     const y = Math.min(Math.max(r.top + r.height / 2, 0), innerHeight - 1);
-    const top = document.elementFromPoint(x, y);
+    const top = pointAt(x, y);
     if (!top) return null;
-    if (e === top || e.contains(top) || (top.contains(e) && top.tagName === "LABEL")) return { x, y };
+    if (e === top || holds(e, top) || (holds(top, e) && top.tagName === "LABEL")) return { x, y };
     const hit = top.closest("button,[role=\"button\"],label");
-    if (hit && !hit.contains(e)) {
+    if (hit && !holds(hit, e)) {
       // Nameless, or painted entirely through children and pseudo-elements (an empty own box):
       // either way it is the control's hit area, not a different control on top of it.
       const box = hit.getBoundingClientRect();
@@ -208,7 +238,7 @@ export function installObserver(version: number): PageObserver {
   };
 
   const formValues = (): unknown[] =>
-    [...document.querySelectorAll("input,textarea,select")]
+    queryAll("input,textarea,select")
       .filter((e) => !SECRET_TYPES.has((e as HTMLInputElement).type))
       .map((e) => {
         const f = e as HTMLInputElement;
@@ -229,12 +259,21 @@ export function installObserver(version: number): PageObserver {
       e.getAttribute("href"), (scopeOf(e) as HTMLElement | null)?.innerText?.slice(0, 2000) ?? ""]);
   };
 
+  /** Text nodes in reading order, descending into each open shadow root where its host is. */
+  const textNodes = function* (root: Node): Generator<Text> {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n.nodeType === Node.TEXT_NODE) yield n as Text;
+      else if ((n as Element).shadowRoot) yield* textNodes((n as Element).shadowRoot!);
+    }
+  };
+
   const visibleText = (max: number): string => {
     const words: string[] = [];
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     const range = document.createRange();
     let length = 0;
-    for (let n = walker.nextNode(); n && length < max; n = walker.nextNode()) {
+    for (const n of textNodes(document.body)) {
+      if (length >= max) break;
       const value = n.textContent?.trim();
       const parent = n.parentElement;
       if (!value || !parent || parent.closest("script,style,noscript,template") || !visible(parent)) continue;
@@ -256,7 +295,7 @@ export function installObserver(version: number): PageObserver {
       for (const [id, e] of nodes) if (!e.isConnected) nodes.delete(id);
 
       const found: { e: Element; entry: Omit<ObservedElement, "id"> }[] = [];
-      for (const e of document.querySelectorAll(SELECTOR)) {
+      for (const e of queryAll(SELECTOR)) {
         const role = roleOf(e);
         if (!role || SECRET_TYPES.has((e as HTMLInputElement).type) || disabled(e)) continue;
         // A hidden checkbox or radio is clicked through its label; keep the control's own name and state.
@@ -315,7 +354,9 @@ export function installObserver(version: number): PageObserver {
 
       const guards: Record<number, string> = {};
       for (const el of elements) guards[el.node] = guard(el.node) ?? "";
-      const active = document.activeElement ? ids.get(document.activeElement) : undefined;
+      let activeElement = document.activeElement;
+      while (activeElement?.shadowRoot?.activeElement) activeElement = activeElement.shadowRoot.activeElement;
+      const active = activeElement ? ids.get(activeElement) : undefined;
       const focused = elements.find((el) => el.node === active)?.id;
 
       return {

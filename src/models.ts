@@ -176,20 +176,58 @@ const PLAN = [
   '{"steps": [..], "finish": ".."}. Each step is one visible outcome in plain words ("Set quantity to 2",',
   '"Enter the email ada@example.com") and carries every value it needs from the goal. Keep the goal\'s order;',
   "2 to 12 steps; no step about stopping. \"finish\" is what the screen shows once the whole task is complete",
-  '(for example "the page says the payment succeeded, or that the card was declined").',
+  '(for example "the page says the payment succeeded, or that the card was declined"). Each step is a string.',
+  'If "previousPlanMissed" is given, an earlier plan left those values out: every one must appear in a step.',
 ].join(" ");
 
 export class Planner extends ChatModel {
-  /** One call per task: the goal as an ordered checklist the decision loop walks through. */
+  /**
+   * One call per task: the goal as an ordered checklist the decision loop walks through.
+   * A plan that leaves out a value the goal spells out (a quantity, an email, a code) is asked
+   * for once more, naming what was missed; small models sometimes list controls, not actions.
+   */
   async plan(goal: string, observation?: Observation): Promise<{ steps: string[]; finish?: string; latencyMs: number; cost?: number }> {
-    const r = await this.complete(PLAN, { goal, ...(observation ? { page: { title: observation.title, url: observation.url } } : {}) }, 1200);
-    // Models vary the key and sometimes return objects; accept the common shapes.
-    const list = [r.json.steps, r.json.plan, r.json.checklist].find(Array.isArray) as unknown[] | undefined;
-    const steps = (list ?? [])
-      .map((s) => typeof s === "string" ? s : (s && typeof s === "object" ? Object.values(s as Record<string, unknown>).find((v) => typeof v === "string") : undefined))
-      .filter((s): s is string => typeof s === "string" && s.trim().length > 0);
-    if (steps.length === 0) throw new ModelError(this.model, `returned no steps: ${JSON.stringify(r.json).slice(0, 200)}`);
-    const finish = typeof r.json.finish === "string" && r.json.finish.trim() ? r.json.finish.trim() : undefined;
-    return { steps: steps.slice(0, 20), ...(finish ? { finish } : {}), latencyMs: r.latencyMs, ...(r.cost !== undefined ? { cost: r.cost } : {}) };
+    const page = observation ? { page: { title: observation.title, url: observation.url } } : {};
+    let r = await this.complete(PLAN, { goal, ...page }, 1200);
+    let latencyMs = r.latencyMs;
+    let cost = r.cost;
+    let parsed = parsePlan(r.json);
+    const missing = (steps: string[]) => valuesIn(goal).filter((v) => !squash(steps.join(" ")).includes(squash(v)));
+    const missed = missing(parsed.steps);
+    if (parsed.steps.length === 0 || missed.length > 0) {
+      r = await this.complete(PLAN, { goal, ...page, previousPlanMissed: missed.length ? missed : "every step" }, 1200);
+      latencyMs += r.latencyMs;
+      if (r.cost !== undefined) cost = (cost ?? 0) + r.cost;
+      const again = parsePlan(r.json);
+      if (again.steps.length > 0 && missing(again.steps).length <= missed.length) parsed = again;
+    }
+    if (parsed.steps.length === 0) throw new ModelError(this.model, `returned no steps: ${JSON.stringify(r.json).slice(0, 200)}`);
+    return { steps: parsed.steps.slice(0, 20), ...(parsed.finish ? { finish: parsed.finish } : {}), latencyMs, ...(cost !== undefined ? { cost } : {}) };
   }
 }
+
+/** Models vary the key and sometimes return steps as objects; accept the common shapes. */
+function parsePlan(json: Record<string, unknown>): { steps: string[]; finish?: string } {
+  const list = [json.steps, json.plan, json.checklist].find(Array.isArray) as unknown[] | undefined;
+  const steps = (list ?? [])
+    .map((s) => typeof s === "string" ? s
+      // An object step ({ target, action }) keeps all of its text, not just the first field.
+      : s && typeof s === "object" ? Object.values(s as Record<string, unknown>).filter((v) => typeof v === "string").join(": ") : "")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const finish = typeof json.finish === "string" && json.finish.trim() ? json.finish.trim() : undefined;
+  return { steps, ...(finish ? { finish } : {}) };
+}
+
+/** Literal values a goal spells out: emails, numbers (card numbers included), codes and quoted text. */
+export function valuesIn(goal: string): string[] {
+  const found = [
+    ...goal.match(/[\w.+-]+@[\w-]+\.[\w.]+/g) ?? [],
+    ...goal.match(/\b\d[\d ]*\d\b|\b\d\b/g) ?? [],
+    ...goal.match(/\b(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{4,}\b/g) ?? [],
+    ...[...goal.matchAll(/"([^"]+)"/g)].map((m) => m[1]!),
+  ];
+  return [...new Set(found.map((v) => v.trim()).filter(Boolean))];
+}
+
+const squash = (s: string) => s.toLowerCase().replace(/\s+/g, "");
