@@ -10,7 +10,8 @@
 // step is already done (then the checklist moves on without acting).
 // `done` and `blocked` are read independently of the pick. A stale target is
 // never retried blindly: the page is observed again and the step is decided
-// again. Three actions in a row that change nothing is treated as blocked.
+// again. Three actions in a row that change nothing, or six that alternate
+// between the same two, are treated as blocked.
 // The report keeps observation, decision, writing and action time apart so a
 // run can be compared phase by phase (the shape jev-use reports).
 
@@ -216,6 +217,13 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
         if (lastThree.length === 3 && lastThree.every((h) => !h.pageChanged && !h.action.startsWith("WAIT"))) {
           report.status = "blocked";
           report.reason = "Three actions in a row changed nothing";
+          break;
+        }
+        // Going back and forth (scroll down, scroll up, down, up…) changes the page but gets nowhere.
+        const lastSix = history.slice(-6).map((h) => h.action);
+        if (lastSix.length === 6 && new Set(lastSix).size <= 2 && lastSix.every((a, i) => i < 2 || a === lastSix[i - 2])) {
+          report.status = "blocked";
+          report.reason = `Going back and forth between ${[...new Set(lastSix)].join(" and ")}`;
           break;
         }
       } catch (e) {
