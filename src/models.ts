@@ -119,11 +119,13 @@ const ADVISE = [
   'that operation or null, "done": true only if the page already shows every requirement met,',
   '"blocked": true only if no offered operation can make progress}.',
   "Choose only from what is offered. If a dialog or popup is open, finish it (Update, Apply, Done) or close it first.",
+  "Scroll only when the control the step needs is not in the offer. A fast model's suggestion is included: take it",
+  "unless it is plainly wrong for the current step.",
 ].join(" ");
 
 export class Advisor extends ChatModel {
   /** Decide one step from the same offer Jev saw. Returns a Decision marked with full confidence. */
-  async decide(goal: string, observation: Observation, history: readonly HistoryEntry[], offer: Offer): Promise<Decision> {
+  async decide(goal: string, observation: Observation, history: readonly HistoryEntry[], offer: Offer, suggestion?: Decision): Promise<Decision> {
     const targets = Object.fromEntries(Object.entries(offer.heads).map(([head, t]) =>
       [head.replace("_target", "").toUpperCase(), Object.fromEntries(Object.entries(t).map(([k, v]) => [k, v.criterion]))]));
     const r = await this.complete(ADVISE, {
@@ -132,6 +134,14 @@ export class Advisor extends ChatModel {
       operations: Object.keys(offer.operations),
       targets,
       recent_actions: history.slice(-8).map((h) => `${h.action}${h.pageChanged ? "" : " (page unchanged)"}`),
+      ...(suggestion ? {
+        fast_model_suggestion: {
+          operation: suggestion.operation,
+          target: suggestion.element?.id ?? null,
+          operation_probabilities: suggestion.operationProbabilities,
+          ...(suggestion.targetProbabilities ? { target_probabilities: suggestion.targetProbabilities } : {}),
+        },
+      } : {}),
     });
     const operation = r.json.operation as Operation;
     if (typeof operation !== "string" || !Object.hasOwn(offer.operations, operation)) throw new ModelError(this.model, `chose an operation that was not offered: ${String(operation)}`);

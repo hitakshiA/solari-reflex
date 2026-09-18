@@ -152,7 +152,8 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
   try {
     while (report.steps.length < maxSteps) {
       const [decision, decideMs] = await timed("decideMs", () =>
-        decide(o, observation, history, { actAt, doneAt, stepDoneAt, blockedAt }, report, currentStep(), finish, justToggled));
+        decide(o, observation, history, { actAt, doneAt, stepDoneAt, blockedAt }, report, currentStep(), finish, justToggled,
+          stepIndex >= plan.length - 1));
 
       // A finished plan step moves the checklist on without acting; the next step is decided fresh.
       if (currentStep() && (decision.stepDone ?? 0) >= stepDoneAt && stepIndex < plan.length - 1) {
@@ -219,6 +220,14 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
         report.steps.push(record);
         await o.onStep?.(record, observation);
 
+        // An action that plainly carries out the current step finishes it without asking any model:
+        // the step names the control that was clicked, or contains the text that was typed.
+        if (currentStep() && pageChanged && stepIndex < plan.length - 1 && carriesOut(currentStep()!, action)) {
+          stepIndex++;
+          if (report.plan) report.plan.reached = stepIndex;
+          history.push({ action: `STEP DONE: ${plan[stepIndex - 1]}`, pageChanged: false });
+        }
+
         const lastThree = history.slice(-3);
         if (lastThree.length === 3 && lastThree.every((h) => !h.pageChanged && !h.action.startsWith("WAIT"))) {
           report.status = "blocked";
@@ -257,7 +266,7 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
 async function decide(
   o: RunOptions, observation: Observation, history: readonly HistoryEntry[],
   gates: { actAt: number; doneAt: number; stepDoneAt: number; blockedAt: number }, report: TaskReport, step?: string, finish?: string,
-  justToggled?: ReadonlySet<number>,
+  justToggled?: ReadonlySet<number>, lastStep = false,
 ): Promise<Decision> {
   const decision = await o.policy.decide(o.goal, observation, history, step, finish, justToggled);
   report.decisions.push(record(decision));
@@ -265,10 +274,13 @@ async function decide(
   report.usage.jevInputTokens += decision.inputTokens;
   report.usage.costUsd += decision.cost ?? 0;
   // A finished page, step or blocked page is acted on whatever the next pick would have been.
-  if (decision.done >= gates.doneAt || decision.blocked >= gates.blockedAt || (decision.stepDone ?? 0) >= gates.stepDoneAt) return decision;
+  // On the last step there is nothing to move on to: a done step there means waiting for the
+  // finish condition (a payment still processing), which the pick or the Advisor handles.
+  const stepFinished = !lastStep && (decision.stepDone ?? 0) >= gates.stepDoneAt;
+  if (decision.done >= gates.doneAt || decision.blocked >= gates.blockedAt || stepFinished) return decision;
   if (decision.confidence >= gates.actAt || !o.advisor) return decision;
   const advised = await o.advisor
-    .decide(step ? `${step} (one step of: ${o.goal})` : o.goal, observation, history, o.policy.offer(observation, justToggled))
+    .decide(step ? `${step} (one step of: ${o.goal})` : o.goal, observation, history, o.policy.offer(observation, justToggled), decision)
     // An Advisor answer that names nothing on offer is discarded; Jev's pick stands.
     .catch((e: unknown) => { if (e instanceof ModelError) return undefined; throw e; });
   if (!advised) return { ...decision, confidence: Math.max(decision.confidence, gates.actAt) };
@@ -302,6 +314,25 @@ function toAction(d: Decision, text: string | undefined): Action {
     case "SCROLL_UP": return { kind: "scroll", direction: "up" };
     case "WAIT": return { kind: "wait" };
   }
+}
+
+/**
+ * Whether an action is the whole of a plan step. A typed value counts when the step
+ * contains it; a click or selection counts only when the step is itself a click-type step
+ * ("Click…", "Select…", "Untick…") that names the control — "Card" must not finish
+ * "Enter the card number".
+ */
+export function carriesOut(step: string, action: Action): boolean {
+  const s = step.toLowerCase().trim();
+  if (action.kind === "type") return action.text.trim().length >= 2 && s.includes(action.text.trim().toLowerCase());
+  const clickStep = /^(click|press|tap|select|choose|pick|tick|untick|check|uncheck|toggle|open|apply)\b/.test(s);
+  if (!clickStep) return false;
+  if (action.kind === "select") return s.includes(action.value.toLowerCase()) || s.includes(action.element.name.toLowerCase());
+  if (action.kind === "click") {
+    const name = action.element.name.trim().toLowerCase();
+    return name.length >= 3 && name !== action.element.role && s.includes(name);
+  }
+  return false;
 }
 
 /** What the action visibly changed on its own target, e.g. ` → checked true→false`. */
