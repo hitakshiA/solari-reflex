@@ -10,8 +10,9 @@
 // step is already done (then the checklist moves on without acting).
 // `done` and `blocked` are read independently of the pick. A stale target is
 // never retried blindly: the page is observed again and the step is decided
-// again. Three actions in a row that change nothing, or six that alternate
-// between the same two, are treated as blocked.
+// again. Three waits in a row reopen the step before them once (a submit that
+// only raised a validation error). Three actions in a row that change nothing,
+// or six that alternate between the same two, are treated as blocked.
 // The report keeps observation, decision, writing and action time apart so a
 // run can be compared phase by phase (the shape jev-use reports).
 
@@ -148,6 +149,8 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
   let written: { key: string; text: string } | undefined;
   // Toggles clicked on the last step are not offered for clicking again on the next.
   let justToggled = new Set<number>();
+  // Plan steps already reopened once because waiting after them brought nothing.
+  const reopened = new Set<number>();
 
   try {
     while (report.steps.length < maxSteps) {
@@ -229,6 +232,15 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
         }
 
         const lastThree = history.slice(-3);
+        // Waiting that brings nothing means the step before did not take effect (a submit that
+        // only raised a validation error, say): reopen it, once per step.
+        if (lastThree.length === 3 && lastThree.every((h) => h.action.startsWith("WAIT")) && stepIndex > 0 && !reopened.has(stepIndex - 1)) {
+          stepIndex--;
+          reopened.add(stepIndex);
+          if (report.plan) report.plan.reached = stepIndex;
+          history.push({ action: `STEP NOT DONE, waiting brought nothing: ${plan[stepIndex]}`, pageChanged: false });
+          continue;
+        }
         if (lastThree.length === 3 && lastThree.every((h) => !h.pageChanged && !h.action.startsWith("WAIT"))) {
           report.status = "blocked";
           report.reason = "Three actions in a row changed nothing";

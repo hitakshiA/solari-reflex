@@ -42,8 +42,7 @@ export function installOverlay(): PageOverlay {
   host.setAttribute("aria-hidden", "true");
   host.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:2147483647";
   const root = host.attachShadow({ mode: "closed" });
-  const style = document.createElement("style");
-  style.textContent = `
+  const css = `
     .box{position:fixed;border:1px solid rgba(56,189,248,.55);border-radius:3px;box-sizing:border-box}
     .tag{position:absolute;top:-1px;left:-1px;transform:translateY(-100%);font:600 10px/1.3 ui-monospace,Menlo,monospace;
          color:#0b1220;background:rgba(56,189,248,.85);padding:0 3px;border-radius:3px 3px 0 0;white-space:nowrap}
@@ -55,7 +54,17 @@ export function installOverlay(): PageOverlay {
     .hud{position:fixed;left:12px;bottom:12px;font:600 13px/1.4 ui-monospace,Menlo,monospace;color:#f8fafc;
          background:rgba(2,6,23,.82);border:1px solid rgba(245,158,11,.6);padding:6px 10px;border-radius:8px;max-width:70vw}
     .probs{display:block;font-weight:500;color:#fcd34d;margin-top:2px}`;
-  root.appendChild(style);
+  // A constructed stylesheet, not a <style> element: pages with a strict Content-Security-Policy
+  // (Stripe Checkout, for one) block inline <style>, which left the overlay unstyled.
+  if ("adoptedStyleSheets" in root && typeof CSSStyleSheet === "function" && "replaceSync" in CSSStyleSheet.prototype) {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(css);
+    root.adoptedStyleSheets = [sheet];
+  } else {
+    const style = document.createElement("style");
+    style.textContent = css;
+    root.appendChild(style);
+  }
   const layer = document.createElement("div");
   root.appendChild(layer);
   (document.body ?? document.documentElement).appendChild(host);
