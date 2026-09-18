@@ -52,8 +52,9 @@ try {
 
 Confidence decides who acts:
 - **At 0.6 or above,** Jev's pick runs.
-- **Between 0.3 and 0.6,** the Advisor decides, choosing from the same offer Jev saw.
-- **Below 0.3,** the task hands back with `needs_help`.
+- **Below 0.6,** the Advisor decides, choosing from the same offer Jev saw. Without an Advisor, the task hands back with `needs_help`.
+
+With a `Planner`, the goal becomes an ordered checklist once, and Jev works through it one step at a time. Whether the current step is already done is read in the same Jev request.
 
 ## Design
 

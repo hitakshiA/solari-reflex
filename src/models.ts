@@ -44,7 +44,7 @@ class ChatModel {
     this.model = o.model;
   }
 
-  protected async complete(system: string, user: unknown): Promise<Completion> {
+  protected async complete(system: string, user: unknown, maxTokens = 400): Promise<Completion> {
     const started = performance.now();
     let response: Response;
     try {
@@ -53,7 +53,7 @@ class ChatModel {
         headers: { Authorization: `Bearer ${this.o.apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: this.o.model,
-          max_tokens: 400,
+          max_tokens: maxTokens,
           response_format: { type: "json_object" },
           reasoning: !this.o.reasoning || this.o.reasoning === "off" ? { enabled: false } : { effort: this.o.reasoning },
           messages: [{ role: "system", content: system }, { role: "user", content: JSON.stringify(user) }],
@@ -156,5 +156,27 @@ export class Advisor extends ChatModel {
       if (target.option) decision.option = target.option;
     }
     return decision;
+  }
+}
+
+// --------------------------------------------------------------- planning ----
+
+const PLAN = [
+  'Break the user\'s goal into the short, ordered steps a person would take on screen. Reply with {"steps": [..]}.',
+  "Each step is one visible outcome in plain words (\"Set quantity to 2\", \"Enter the email ada@example.com\"), and",
+  "carries every value it needs from the goal. Keep the goal's order; 2 to 12 steps; no step about stopping.",
+].join(" ");
+
+export class Planner extends ChatModel {
+  /** One call per task: the goal as an ordered checklist the decision loop walks through. */
+  async plan(goal: string, observation?: Observation): Promise<{ steps: string[]; latencyMs: number; cost?: number }> {
+    const r = await this.complete(PLAN, { goal, ...(observation ? { page: { title: observation.title, url: observation.url } } : {}) }, 1200);
+    // Models vary the key and sometimes return objects; accept the common shapes.
+    const list = [r.json.steps, r.json.plan, r.json.checklist].find(Array.isArray) as unknown[] | undefined;
+    const steps = (list ?? [])
+      .map((s) => typeof s === "string" ? s : (s && typeof s === "object" ? Object.values(s as Record<string, unknown>).find((v) => typeof v === "string") : undefined))
+      .filter((s): s is string => typeof s === "string" && s.trim().length > 0);
+    if (steps.length === 0) throw new ModelError(this.model, `returned no steps: ${JSON.stringify(r.json).slice(0, 200)}`);
+    return { steps: steps.slice(0, 20), latencyMs: r.latencyMs, ...(r.cost !== undefined ? { cost: r.cost } : {}) };
   }
 }

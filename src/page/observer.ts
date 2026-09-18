@@ -19,7 +19,7 @@
 //   - one entry per control; TYPE and SELECT are operations on it, not
 //     separate entries.
 
-export const OBSERVER_VERSION = 3;
+export const OBSERVER_VERSION = 6;
 
 export type Role =
   | "button" | "link" | "checkbox" | "radio" | "switch" | "tab" | "menuitem" | "option"
@@ -176,14 +176,35 @@ export function installObserver(version: number): PageObserver {
   const inViewport = (r: DOMRect): boolean =>
     r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
 
-  /** A control is covered when the topmost element at its centre is neither it nor inside it. */
+  /**
+   * The point to click, or null when the control is covered. It is not covered when the
+   * topmost element at its centre is the control, inside it, its own label, or a clickable
+   * hit area laid over it — nameless, or with an empty box of its own (Stripe Checkout's
+   * payment-method rows are a zero-size "Pay with card" button painted across the row).
+   * Clicking there is what a person does. A modal backdrop or a sized, named control on
+   * top still counts as covering.
+   */
   const centre = (e: Element): PointTarget | null => {
     const r = e.getBoundingClientRect();
     const x = Math.min(Math.max(r.left + r.width / 2, 0), innerWidth - 1);
     const y = Math.min(Math.max(r.top + r.height / 2, 0), innerHeight - 1);
     const top = document.elementFromPoint(x, y);
-    if (!top || !(e === top || e.contains(top) || top.contains(e) && top.tagName === "LABEL")) return null;
-    return { x, y };
+    if (!top) return null;
+    if (e === top || e.contains(top) || (top.contains(e) && top.tagName === "LABEL")) return { x, y };
+    const hit = top.closest("button,[role=\"button\"],label");
+    if (hit && !hit.contains(e)) {
+      // Nameless, or painted entirely through children and pseudo-elements (an empty own box):
+      // either way it is the control's hit area, not a different control on top of it.
+      const box = hit.getBoundingClientRect();
+      if (!accessibleName(hit) || box.width === 0 || box.height === 0) return { x, y };
+    }
+    return null;
+  };
+
+  /** Custom checkboxes and radios hide the input and style its label; the label is what a person clicks. */
+  const standIn = (e: Element, role: Role): Element | null => {
+    if (role !== "checkbox" && role !== "radio") return null;
+    return [...((e as HTMLInputElement).labels ?? [])].find((l) => visible(l) && centre(l) !== null) ?? null;
   };
 
   const formValues = (): unknown[] =>
@@ -238,14 +259,9 @@ export function installObserver(version: number): PageObserver {
       for (const e of document.querySelectorAll(SELECTOR)) {
         const role = roleOf(e);
         if (!role || SECRET_TYPES.has((e as HTMLInputElement).type) || disabled(e)) continue;
-        // Custom checkboxes and radios hide the input and style its label; the label is what a person clicks.
-        let target: Element = e;
-        if ((role === "checkbox" || role === "radio") && (!visible(e) || !centre(e))) {
-          const label = [...((e as HTMLInputElement).labels ?? [])].find((l) => visible(l) && inViewport(l.getBoundingClientRect()) && centre(l));
-          if (!label) continue;
-          target = label;
-        }
-        if (!visible(target) || !inViewport(target.getBoundingClientRect()) || !centre(target)) continue;
+        // A hidden checkbox or radio is clicked through its label; keep the control's own name and state.
+        const target = visible(e) && centre(e) ? e : standIn(e, role);
+        if (!target || !visible(target) || !inViewport(target.getBoundingClientRect()) || !centre(target)) continue;
         // A grid cell that only wraps a button is represented by the button.
         if (role === "gridcell" && e.querySelector("button,[role=\"button\"]")) continue;
         const owner = e.parentElement?.closest(SELECTOR);
@@ -276,9 +292,19 @@ export function installObserver(version: number): PageObserver {
         found.push({ e, entry });
       }
 
+      // A stand-in can also be observed on its own (usually as a nameless button):
+      // keep one entry per node, preferring the one with a real name.
+      const best = new Map<number, number>();
+      found.forEach((f, i) => {
+        const j = best.get(f.entry.node);
+        const kept = j === undefined ? undefined : found[j];
+        if (!kept || (kept.entry.name === kept.entry.role && f.entry.name !== f.entry.role)) best.set(f.entry.node, i);
+      });
+      const unique = found.filter((f, i) => best.get(f.entry.node) === i);
+
       const counts = new Map<string, number>();
-      for (const { entry } of found) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1);
-      const elements: ObservedElement[] = found.slice(0, maxElements).map(({ e, entry }, i) => {
+      for (const { entry } of unique) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1);
+      const elements: ObservedElement[] = unique.slice(0, maxElements).map(({ e, entry }, i) => {
         const element: ObservedElement = { id: `e${i + 1}`, ...entry };
         if ((counts.get(entry.name) ?? 0) > 1) {
           const scope = (scopeOf(e) as HTMLElement | null)?.innerText?.replace(/\s+/g, " ").trim();
@@ -299,7 +325,7 @@ export function installObserver(version: number): PageObserver {
         scroll: { y: Math.round(scrollY), height: document.documentElement.scrollHeight },
         text: visibleText(maxTextChars),
         elements,
-        omitted: Math.max(0, found.length - maxElements),
+        omitted: Math.max(0, unique.length - maxElements),
         ...(focused ? { focused } : {}),
         pageKey: pageKey(),
         guards,

@@ -37,6 +37,8 @@ export interface Decision {
   done: number;
   /** P(no available operation can make progress). */
   blocked: number;
+  /** P(the current plan step is already visibly complete), when a step was given. */
+  stepDone?: number;
   operationProbabilities: Record<string, number>;
   targetProbabilities?: Record<string, number>;
   model: string;
@@ -83,6 +85,7 @@ const TARGET = [
 ].join(" ");
 
 const DONE = "Does the CURRENT page visibly show that every requirement of the goal is satisfied? A matching link or result that has not been opened is not enough.";
+const STEP_DONE = "Does the CURRENT page visibly show that this step is already complete (the value is set, the option applied, the field filled)?";
 const BLOCKED = "Is progress impossible from this page with the offered operations (for example a login wall, a captcha, or an error page)?";
 
 export class Policy {
@@ -102,22 +105,28 @@ export class Policy {
     return !this.deny.some((term) => name.includes(term));
   }
 
-  async decide(goal: string, observation: Observation, history: readonly HistoryEntry[]): Promise<Decision> {
+  /**
+   * Decide the next step. With `step`, Jev works on that one item of a plan (the
+   * overall goal stays in view) and also reads whether it is already done.
+   */
+  async decide(goal: string, observation: Observation, history: readonly HistoryEntry[], step?: string): Promise<Decision> {
     const offer = this.offer(observation);
+    const aim = step ? `${step} (this is one step of the overall goal: ${goal})` : goal;
     const operations = Object.keys(offer.operations) as Operation[];
     const questions: Record<string, ChoiceQuestion | NoulQuestion> = {
       operation: {
         type: "choice",
-        instructions: { goal, rules: NEXT_ACTION },
+        instructions: { goal: aim, rules: NEXT_ACTION },
         criteria: Object.fromEntries(operations.map((op) => [op, DESCRIPTIONS[op]])),
       },
       done: { type: "noul", instructions: { goal, question: DONE } },
       blocked: { type: "noul", instructions: { goal, question: BLOCKED } },
+      ...(step ? { step_done: { type: "noul" as const, instructions: { step, question: STEP_DONE } } } : {}),
     };
     for (const [head, targets] of Object.entries(offer.heads)) {
       questions[head] = {
         type: "choice",
-        instructions: { goal, operation: head.replace("_target", "").toUpperCase(), rules: TARGET },
+        instructions: { goal: aim, operation: head.replace("_target", "").toUpperCase(), rules: TARGET },
         criteria: Object.fromEntries(Object.entries(targets).map(([key, t]) => [key, t.criterion])),
       };
     }
@@ -138,6 +147,7 @@ export class Policy {
       confidence: op.confidence,
       done: noul(r.answers.done),
       blocked: noul(r.answers.blocked),
+      ...(step ? { stepDone: noul(r.answers.step_done) } : {}),
       operationProbabilities: op.probabilities,
       model: r.model,
       latencyMs: r.latencyMs,

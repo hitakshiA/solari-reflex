@@ -10,7 +10,7 @@ export {
   DEFAULT_JEV_MODEL, JevClient, MAX_CHOICE_OPTIONS, OPENROUTER_DECISIONS_URL,
   type ChoiceAnswer, type ChoiceQuestion, type JevClientOptions, type JevResult, type NoulAnswer, type NoulQuestion, type Question,
 } from "./jev.ts";
-export { Advisor, OPENROUTER_CHAT_URL, TextWriter, type ChatModelOptions, type WrittenText } from "./models.ts";
+export { Advisor, OPENROUTER_CHAT_URL, Planner, TextWriter, type ChatModelOptions, type WrittenText } from "./models.ts";
 export type { Observation, ObservedElement, Role } from "./page/observer.ts";
 export { overlayFor, type OverlayBox, type OverlayState } from "./page/overlay.ts";
 export { BrowserRecorder, type RecorderOptions } from "./recorder.ts";

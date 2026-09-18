@@ -2,9 +2,12 @@
 // with no generative model in the common path.
 //
 //   confidence ≥ actAt        act on Jev's pick
-//   escalateAt ≤ c < actAt    ask the Advisor, choosing from the same offer
-//   c < escalateAt            stop and hand back ("needs_help")
+//   confidence < actAt        ask the Advisor, choosing from the same offer;
+//                             without one, stop and hand back ("needs_help")
 //
+// With a Planner, the goal is turned into an ordered checklist once and Jev
+// works one step at a time, reading in the same request whether the current
+// step is already done (then the checklist moves on without acting).
 // `done` and `blocked` are read independently of the pick. A stale target is
 // never retried blindly: the page is observed again and the step is decided
 // again. Three actions in a row that change nothing is treated as blocked.
@@ -13,7 +16,7 @@
 
 import type { Action, Surface } from "./surface.ts";
 import { ReflexError, StaleObservationError } from "./errors.ts";
-import type { Advisor, TextWriter } from "./models.ts";
+import type { Advisor, Planner, TextWriter } from "./models.ts";
 import type { Observation } from "./page/observer.ts";
 import type { Decision, HistoryEntry, Policy } from "./policy.ts";
 
@@ -56,6 +59,8 @@ export interface TaskReport {
   reason?: string;
   steps: StepRecord[];
   decisions: DecisionRecord[];
+  /** The checklist from the planner, when one was used, and how far the task got through it. */
+  plan?: { steps: string[]; reached: number; ms: number };
   /** Totals for the whole task, in ms. */
   timings: { totalMs: number; observeMs: number; decideMs: number; writeMs: number; actMs: number };
   usage: { jevCalls: number; jevInputTokens: number; advisorCalls: number; writerCalls: number; costUsd: number };
@@ -68,17 +73,23 @@ export interface RunOptions {
   page: Surface;
   policy: Policy;
   writer: TextWriter;
-  /** Consulted when Jev's confidence falls between `escalateAt` and `actAt`. Without it, those steps hand back. */
+  /** Consulted when Jev's confidence is below `actAt`. Without it, those steps hand back. */
   advisor?: Advisor;
+  /** Turns the goal into an ordered checklist once; Jev then works one step at a time. */
+  planner?: Planner;
   goal: string;
   /** Action budget. Default 30. */
   maxSteps?: number;
   /** Act on Jev's pick at or above this confidence. Default 0.6. */
   actAt?: number;
-  /** Below this, stop instead of escalating. Default 0.3. */
-  escalateAt?: number;
   /** Stop as done at or above this P(done). Default 0.8. */
   doneAt?: number;
+  /**
+   * Move the checklist on at or above this P(step done). Default 0.6: a finished step
+   * often leaves nothing to point at (an applied code replaces its field), so the bar
+   * is lower than for finishing the whole task.
+   */
+  stepDoneAt?: number;
   /** Stop as blocked at or above this P(blocked). Default 0.85. */
   blockedAt?: number;
   /** Stale targets tolerated before handing back. Default 6. */
@@ -92,8 +103,8 @@ export interface RunOptions {
 export async function runTask(o: RunOptions): Promise<TaskReport> {
   const maxSteps = o.maxSteps ?? 30;
   const actAt = o.actAt ?? 0.6;
-  const escalateAt = o.escalateAt ?? 0.3;
   const doneAt = o.doneAt ?? 0.8;
+  const stepDoneAt = o.stepDoneAt ?? 0.6;
   const blockedAt = o.blockedAt ?? 0.85;
   const maxStaleRetries = o.maxStaleRetries ?? 6;
 
@@ -120,17 +131,34 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
   };
 
   let [observation, observeMs] = await timed("observeMs", () => o.page.observe());
+  let plan: string[] = [];
+  let stepIndex = 0;
+  if (o.planner) {
+    const t0 = performance.now();
+    const p = await o.planner.plan(o.goal, observation);
+    report.usage.costUsd += p.cost ?? 0;
+    plan = p.steps;
+    report.plan = { steps: plan, reached: 0, ms: Math.round(performance.now() - t0) };
+  }
+  const currentStep = () => plan[stepIndex];
   // A text value survives a stale retry only if the field it was written for is unchanged.
   let written: { key: string; text: string } | undefined;
 
   try {
     while (report.steps.length < maxSteps) {
       const [decision, decideMs] = await timed("decideMs", () =>
-        decide(o, observation, history, { actAt, escalateAt, doneAt, blockedAt }, report));
+        decide(o, observation, history, { actAt, doneAt, stepDoneAt, blockedAt }, report, currentStep()));
 
-      if (decision.done >= doneAt) { report.status = "done"; break; }
+      // A finished plan step moves the checklist on without acting; the next step is decided fresh.
+      if (currentStep() && (decision.stepDone ?? 0) >= stepDoneAt && stepIndex < plan.length - 1) {
+        stepIndex++;
+        if (report.plan) report.plan.reached = stepIndex;
+        history.push({ action: `STEP DONE: ${plan[stepIndex - 1]}`, pageChanged: false });
+        continue;
+      }
+      if (decision.done >= doneAt && (!plan.length || stepIndex >= plan.length - 1)) { report.status = "done"; break; }
       if (decision.blocked >= blockedAt) { report.status = "blocked"; report.reason = "The page offers no way forward"; break; }
-      if (decision.confidence < escalateAt || (decision.confidence < actAt && !o.advisor)) {
+      if (decision.confidence < actAt) {
         report.status = "needs_help";
         report.reason = `Jev confidence ${decision.confidence.toFixed(2)} is too low to act`;
         break;
@@ -144,7 +172,10 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
       if (field) {
         const key = `${field.node}:${observation.guards[field.node] ?? ""}`;
         if (written?.key !== key) {
-          const [w, ms] = await timed("writeMs", () => o.writer.write(o.goal, field, observation, history));
+          const aim = currentStep() ? `${currentStep()} (one step of: ${o.goal})` : o.goal;
+          // One retry: a small model occasionally returns something that is not JSON.
+          const [w, ms] = await timed("writeMs", () =>
+            o.writer.write(aim, field, observation, history).catch(() => o.writer.write(aim, field, observation, history)));
           report.usage.writerCalls++;
           report.usage.costUsd += w.cost ?? 0;
           written = { key, text: w.text };
@@ -211,23 +242,27 @@ export async function runTask(o: RunOptions): Promise<TaskReport> {
 
 async function decide(
   o: RunOptions, observation: Observation, history: readonly HistoryEntry[],
-  gates: { actAt: number; escalateAt: number; doneAt: number; blockedAt: number }, report: TaskReport,
+  gates: { actAt: number; doneAt: number; stepDoneAt: number; blockedAt: number }, report: TaskReport, step?: string,
 ): Promise<Decision> {
-  const decision = await o.policy.decide(o.goal, observation, history);
+  const decision = await o.policy.decide(o.goal, observation, history, step);
   report.decisions.push(record(decision));
   report.usage.jevCalls++;
   report.usage.jevInputTokens += decision.inputTokens;
   report.usage.costUsd += decision.cost ?? 0;
-  // A finished or blocked page ends the task whatever the next pick would have been.
-  if (decision.done >= gates.doneAt || decision.blocked >= gates.blockedAt) return decision;
-  const unsure = decision.confidence >= gates.escalateAt && decision.confidence < gates.actAt;
-  if (!unsure || !o.advisor) return decision;
-  const advised = await o.advisor.decide(o.goal, observation, history, o.policy.offer(observation));
+  // A finished page, step or blocked page is acted on whatever the next pick would have been.
+  if (decision.done >= gates.doneAt || decision.blocked >= gates.blockedAt || (decision.stepDone ?? 0) >= gates.stepDoneAt) return decision;
+  if (decision.confidence >= gates.actAt || !o.advisor) return decision;
+  const advised = await o.advisor.decide(step ? `${step} (one step of: ${o.goal})` : o.goal, observation, history, o.policy.offer(observation));
   report.decisions.push(record(advised));
   report.usage.advisorCalls++;
   report.usage.costUsd += advised.cost ?? 0;
   // Jev's done/blocked readings are calibrated; keep them unless the advisor is sure.
-  return { ...advised, done: Math.max(advised.done, decision.done), blocked: Math.max(advised.blocked, decision.blocked) };
+  return {
+    ...advised,
+    done: Math.max(advised.done, decision.done),
+    blocked: Math.max(advised.blocked, decision.blocked),
+    ...(decision.stepDone !== undefined ? { stepDone: decision.stepDone } : {}),
+  };
 }
 
 function toAction(d: Decision, text: string | undefined): Action {
