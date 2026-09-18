@@ -1,0 +1,24 @@
+solari-reflex adapts code and design from these MIT-licensed projects.
+
+browser-use/jev-ultrafast — https://github.com/browser-use/jev-ultrafast
+  src/page/observer.ts adapts jev_ultrafast/snapshot.js (accessible names,
+  roles, page key and guards, settle); src/policy.ts and src/models.ts adapt
+  the operation/target question design and the text-writer prompt from
+  jev_ultrafast/model.py and questions.py.
+  Copyright (c) 2026 Browser Use.
+
+trycua/cua — https://github.com/trycua/cua
+  src/policy.ts follows the suggest_action design (PR #3914): deny terms
+  enforced in code, independent done/blocked readings, row label borrowing,
+  stable fallback error codes (src/errors.ts).
+  Copyright (c) 2025 Cua AI, Inc.
+
+vlad-terin/jev-use — https://github.com/vlad-terin/jev-use
+  src/agent.ts reports per-phase timings in the shape jev-use uses.
+  Copyright (c) 2026 jev-cua-bridge contributors.
+
+awlevin/typesafe-computer-use — https://github.com/awlevin/typesafe-computer-use
+  Two-part decision confidence as the minimum of its parts.
+  Copyright (c) 2026 Aaron Levin.
+
+The MIT license text for each is in its repository.
