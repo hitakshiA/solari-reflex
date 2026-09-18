@@ -15,7 +15,7 @@ Measured against the Codex CLI (GPT-6 Astra) driving the same Solari machines th
 | Task | solari-reflex + Jev | Codex + Solari's MCP |
 |---|---|---|
 | Stripe Checkout (quantity 2, promotion code, card), verified by Stripe's API | **60.2 s**, $0.011 | 194.9 s, 34 tool calls |
-| Six different Stripe checkouts, one Solari browser each | **66 s** for all six in parallel, $0.064 | |
+| Six different Stripe checkouts | **66 s**, one Jev agent per browser, $0.064 | 460 s as one Codex job, 86 tool calls |
 | 30 expenses categorised in LibreOffice Calc on a Solari desktop, checked against an answer key | **24.2 s**, $0.0008 | 98.4 s, 77 tool calls |
 
 ```bash
@@ -91,7 +91,7 @@ const video = await recorder.stop()
 
 | Phase | What happens | Cost |
 |---|---|---|
-| Observe | Browser: one `Runtime.evaluate` reads the visible controls, their values and state, the visible text, a page key and a guard for each control. Desktop: one reflexd request reads the same from the accessibility tree | One round trip |
+| Observe | Browser: one `Runtime.evaluate` reads the visible controls, their values and state, the visible text, a page key and a guard for each control, including inside open shadow roots (web components, Salesforce Lightning). Desktop: one reflexd request reads the same from the accessibility tree | One round trip |
 | Decide | One Jev request asks which operation to run, which target to use under every operation (speculatively, in the same request), and whether the goal is done or blocked | About 400 ms, about $0.0001 |
 | Write | Only for TYPE: a small model writes the value as strict JSON | About 600 ms |
 | Act | Checks the target's guard, reads its current position, refuses a control that has been covered, then sends the input events pipelined | One or two round trips |
